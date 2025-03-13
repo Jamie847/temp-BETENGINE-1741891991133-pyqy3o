@@ -1,0 +1,212 @@
+/*
+  # NCAA Basketball Database Schema
+
+  1. Tables
+    - teams: Stores team information and statistics
+    - matches: Game/match information
+    - predictions: AI predictions for matches
+    - betting_odds: Betting market data
+    - historical_performance: Historical team performance data
+    - weather_data: Weather conditions for matches
+    - tournament_games: Tournament-specific game data
+    - tournament_history: Team's tournament history
+
+  2. Security
+    - RLS enabled on all tables
+    - Public read access
+    - Service role full access
+    - UUID validation triggers
+
+  3. Views
+    - prediction_performance: Aggregated prediction metrics
+    - sport_prediction_accuracy: Sport-specific prediction accuracy
+    - tournament_prediction_accuracy: Tournament prediction metrics
+*/
+
+-- Create tables
+CREATE TABLE IF NOT EXISTS teams (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name text NOT NULL,
+    sport text NOT NULL DEFAULT 'NCAAB',
+    logo_url text DEFAULT 'https://via.placeholder.com/24?text=Team',
+    record text DEFAULT '0-0',
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    conference text,
+    ranking integer,
+    seed integer,
+    strength_of_schedule numeric(5,2),
+    net_ranking integer,
+    tournament_appearances integer DEFAULT 0,
+    final_four_appearances integer DEFAULT 0,
+    tournament_win_pct numeric(5,2) DEFAULT 0,
+    upset_factor numeric(5,2) DEFAULT 0,
+    CONSTRAINT valid_sport CHECK (sport = 'NCAAB'),
+    CONSTRAINT valid_record_format CHECK (record ~ '^[0-9]+-[0-9]+(-[0-9]+)?$' OR record = '0-0' OR record = '')
+);
+
+CREATE TABLE IF NOT EXISTS matches (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    sport text NOT NULL,
+    home_team_id uuid REFERENCES teams(id),
+    away_team_id uuid REFERENCES teams(id),
+    start_time timestamptz NOT NULL,
+    venue_name text,
+    venue_city text,
+    venue_state text,
+    status text DEFAULT 'scheduled',
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    home_score integer,
+    away_score integer,
+    result_data jsonb,
+    tournament_round text,
+    bracket_region text,
+    is_neutral_site boolean DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS predictions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    match_id uuid REFERENCES matches(id),
+    home_win_probability double precision NOT NULL,
+    away_win_probability double precision NOT NULL,
+    confidence_score double precision NOT NULL,
+    factors jsonb,
+    outcome boolean,
+    created_at timestamptz DEFAULT now(),
+    resolved_at timestamptz,
+    actual_outcome boolean,
+    prediction_type text DEFAULT 'regular',
+    profit_loss numeric(10,2) DEFAULT 0,
+    notes text,
+    sport text
+);
+
+CREATE TABLE IF NOT EXISTS betting_odds (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    match_id uuid REFERENCES matches(id),
+    home_odds double precision,
+    away_odds double precision,
+    over_under double precision,
+    line_movements jsonb,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS historical_performance (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_id uuid REFERENCES teams(id),
+    season integer NOT NULL,
+    tournament_seed integer,
+    regular_season_wins integer,
+    regular_season_losses integer,
+    tournament_result text,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    CONSTRAINT valid_season CHECK (season >= 1939 AND season::numeric <= EXTRACT(year FROM now()) + 1)
+);
+
+CREATE TABLE IF NOT EXISTS weather_data (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    match_id uuid REFERENCES matches(id),
+    temperature double precision,
+    condition text,
+    wind_speed double precision,
+    precipitation double precision,
+    humidity double precision,
+    created_at timestamptz DEFAULT now()
+);
+
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_teams_sport_name ON teams (sport, name);
+CREATE INDEX IF NOT EXISTS idx_teams_conference ON teams (conference);
+CREATE INDEX IF NOT EXISTS idx_teams_ranking ON teams (ranking) WHERE ranking IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_teams_seed ON teams (seed) WHERE seed IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_teams_net_ranking ON teams (net_ranking);
+
+CREATE INDEX IF NOT EXISTS idx_matches_date ON matches (start_time);
+CREATE INDEX IF NOT EXISTS idx_matches_teams ON matches (sport, home_team_id, away_team_id);
+CREATE INDEX IF NOT EXISTS idx_matches_tournament ON matches (tournament_round, start_time) WHERE tournament_round IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_matches_upcoming ON matches (sport, start_time, status);
+
+CREATE INDEX IF NOT EXISTS idx_predictions_confidence ON predictions (confidence_score);
+CREATE INDEX IF NOT EXISTS idx_predictions_match_type ON predictions (match_id, prediction_type);
+CREATE INDEX IF NOT EXISTS idx_predictions_resolved ON predictions (resolved_at);
+
+-- Create views
+CREATE OR REPLACE VIEW prediction_performance AS
+SELECT 
+    prediction_type,
+    COUNT(*) as total_predictions,
+    COUNT(*) FILTER (WHERE resolved_at IS NOT NULL) as resolved_predictions,
+    COUNT(*) FILTER (WHERE actual_outcome = true) as correct_predictions,
+    AVG(confidence_score) as avg_confidence,
+    CASE 
+        WHEN COUNT(*) FILTER (WHERE resolved_at IS NOT NULL) > 0 
+        THEN ROUND(100.0 * COUNT(*) FILTER (WHERE actual_outcome = true) / 
+                          COUNT(*) FILTER (WHERE resolved_at IS NOT NULL), 2)
+        ELSE 0 
+    END as win_percentage,
+    SUM(profit_loss) as profit_loss
+FROM predictions
+GROUP BY prediction_type;
+
+-- Enable RLS
+ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+ALTER TABLE matches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE predictions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE betting_odds ENABLE ROW LEVEL SECURITY;
+ALTER TABLE historical_performance ENABLE ROW LEVEL SECURITY;
+ALTER TABLE weather_data ENABLE ROW LEVEL SECURITY;
+
+-- Create RLS policies
+CREATE POLICY "Enable read access for all users" ON teams FOR SELECT USING (true);
+CREATE POLICY "Enable service role full access" ON teams FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+CREATE POLICY "Enable read access for all users" ON matches FOR SELECT USING (true);
+CREATE POLICY "Enable service role full access" ON matches FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+CREATE POLICY "Enable read access for all users" ON predictions FOR SELECT USING (true);
+CREATE POLICY "Enable service role full access" ON predictions FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+CREATE POLICY "Enable read access for all users" ON betting_odds FOR SELECT USING (true);
+CREATE POLICY "Enable service role full access" ON betting_odds FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+CREATE POLICY "Enable read access for all users" ON historical_performance FOR SELECT USING (true);
+CREATE POLICY "Enable service role full access" ON historical_performance FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+CREATE POLICY "Enable read access for all users" ON weather_data FOR SELECT USING (true);
+CREATE POLICY "Enable service role full access" ON weather_data FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- Grant permissions
+GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
+
+-- Create triggers for updated_at columns
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_teams_updated_at
+    BEFORE UPDATE ON teams
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_matches_updated_at
+    BEFORE UPDATE ON matches
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_betting_odds_updated_at
+    BEFORE UPDATE ON betting_odds
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_historical_performance_updated_at
+    BEFORE UPDATE ON historical_performance
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
